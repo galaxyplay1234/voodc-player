@@ -5,19 +5,19 @@ import qs from "qs";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/** Domínios permitidos (voodc + subdomínios) */
+/* ===== Helpers ===== */
+
 function isAllowed(urlStr) {
   try {
     const { hostname } = new URL(urlStr);
+    // permite voodc.com, www.voodc.com e QUALQUER subdomínio *.voodc.com
     if (hostname === "voodc.com" || hostname === "www.voodc.com") return true;
-    // permite subdomínios: *.voodc.com
     return hostname.endsWith(".voodc.com");
   } catch {
     return false;
   }
 }
 
-/** Tenta clicar/acionar players em TODAS as frames (página e iframes) */
 async function pokeAllFrames(page) {
   const selectors = [
     ".vjs-big-play-button",
@@ -25,47 +25,47 @@ async function pokeAllFrames(page) {
     "button[title='Play']",
     "button[aria-label='Reproduzir']",
     "button[title='Reproduzir']",
-    "div[role='button']",
     ".plyr__control--overlaid",
     ".jw-icon-playback",
     ".shaka-play-button",
+    "button.play",
+    ".btn-play",
   ];
 
-  // 1) clique genérico no centro da viewport
+  // 1) clique no centro da viewport da página principal
   try {
-    const { width, height } = await page.viewport() || { width: 800, height: 600 };
-    await page.mouse.move(Math.floor(width / 2), Math.floor(height / 2));
-    await page.mouse.click(Math.floor(width / 2), Math.floor(height / 2), { delay: 40 });
+    const vp = page.viewport() || { width: 1280, height: 720 };
+    const cx = Math.floor(vp.width / 2);
+    const cy = Math.floor(vp.height / 2);
+    await page.mouse.move(cx, cy);
+    await page.mouse.click(cx, cy, { delay: 40 });
   } catch {}
 
-  // 2) dispare cliques por selectors em TODAS as frames
-  const frames = page.frames();
-  for (const frame of frames) {
+  // 2) tenta clicar em seletores nos frames (onde for MESMA ORIGEM)
+  for (const frame of page.frames()) {
     try {
       await frame.evaluate((sels) => {
         for (const s of sels) {
           const el = document.querySelector(s);
-          if (el) {
-            el.click();
-          }
+          if (el) el.click();
         }
-        // gesto genérico de usuário
-        document.body && document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        document.body?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       }, selectors);
-    } catch {}
+    } catch {
+      // cross-origin frame: sem acesso ao DOM → ignore
+    }
   }
 
-  // 3) tente tocar vídeos diretamente (muted para burlar autoplay policy)
-  for (const frame of frames) {
+  // 3) tenta tocar qualquer <video> (muted) nos frames de mesma origem
+  for (const frame of page.frames()) {
     try {
       await frame.evaluate(() => {
         const vids = Array.from(document.querySelectorAll("video"));
         for (const v of vids) {
           try {
             v.muted = true;
-            // alguns players pausam se sem controles; adiciona atributo por garantia
-            v.setAttribute("playsinline", "true");
             v.setAttribute("muted", "true");
+            v.setAttribute("playsinline", "true");
             v.play().catch(() => {});
           } catch {}
         }
@@ -73,56 +73,60 @@ async function pokeAllFrames(page) {
     } catch {}
   }
 
-  // 4) teclas comuns de play (espaco/k)
+  // 4) teclas comuns de play
   try { await page.keyboard.press(" "); } catch {}
+  try { await page.keyboard.press("Enter"); } catch {}
   try { await page.keyboard.press("k"); } catch {}
 }
 
-/** Extrai a primeira URL .m3u8 vista nos requests/responses (inclui iframes) */
 async function extractM3U8FromPage(pageUrl) {
-  if (!isAllowed(pageUrl)) {
-    throw new Error("Host não permitido para extração.");
-  }
+  if (!isAllowed(pageUrl)) throw new Error("Host não permitido para extração.");
 
   const browser = await puppeteer.launch({
+    // usar “new headless” melhora compatibilidade em alguns sites
+    headless: "new",
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
+      "--window-size=1366,768",
+      // reduz fingerprint de headless
+      "--allow-running-insecure-content",
+      "--autoplay-policy=no-user-gesture-required",
     ],
   });
 
-  let m3u8 = null;
   const ctx = await browser.createIncognitoBrowserContext();
   const page = await ctx.newPage();
 
   // UA de desktop
   await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
   );
-  await page.setExtraHTTPHeaders({ "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7" });
-
-  // Logs para debug (aparecem na Koyeb)
-  page.on("framenavigated", (frame) => {
-    try {
-      console.log("[frame] navigated:", frame.url()?.slice(0, 200));
-    } catch {}
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
   });
 
-  // captura todas as requisições .m3u8 (página + subframes)
+  let m3u8 = null;
+
+  // ===== LOGS ÚTEIS (veja na Koyeb) =====
+  page.on("console", (msg) => console.log("[console]", msg.text()));
+  page.on("pageerror", (err) => console.error("[pageerror]", err?.message || err));
+  page.on("framenavigated", (frame) => {
+    try { console.log("[frame]", frame.url()?.slice(0, 200)); } catch {}
+  });
+
+  // Captura .m3u8 por requests/responses (página + subframes)
   page.on("request", (req) => {
     const url = req.url();
     if (/\.m3u8(\?|$)/i.test(url)) {
       if (!m3u8) {
         m3u8 = url;
-        console.log("[M3U8][request] ", url);
+        console.log("[M3U8][request]", url);
       }
     }
   });
-
-  // e também via responses (às vezes chega por fetch)
   page.on("response", (resp) => {
     const url = resp.url();
     if (/\.m3u8(\?|$)/i.test(url)) {
@@ -133,32 +137,34 @@ async function extractM3U8FromPage(pageUrl) {
     }
   });
 
-  const GOTO_TIMEOUT = 25000;     // 25s pra carregar o embed
-  const GLOBAL_TIMEOUT = 60000;   // 60s pra detectar o m3u8
+  const GOTO_TIMEOUT = 30000;      // até 30s pra carregar o embed
+  const GLOBAL_TIMEOUT = 120000;   // espera até 120s pelo .m3u8
 
   try {
     console.log("[goto]", pageUrl);
-    // "domcontentloaded" evita travar caso a página nunca entre em network idle
     await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: GOTO_TIMEOUT });
 
-    // dá um respiro e tenta interação
+    // Anti-bot comum: mascarar webdriver
+    try {
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => false });
+      });
+    } catch {}
+
+    // “Cutuca” o player e repete durante a espera
+    const start = Date.now();
     await page.waitForTimeout(1200);
     await pokeAllFrames(page);
 
-    // laço de espera por até 60s
-    const t0 = Date.now();
-    while (!m3u8 && Date.now() - t0 < GLOBAL_TIMEOUT) {
+    while (!m3u8 && Date.now() - start < GLOBAL_TIMEOUT) {
       await page.waitForTimeout(500);
-
-      // tenta novamente “cutucar” frames a cada 2,5s
-      if ((Date.now() - t0) % 2500 < 600) {
+      // a cada ~3s tenta de novo (players que só liberam após gesto)
+      if ((Date.now() - start) % 3000 < 600) {
         await pokeAllFrames(page);
       }
     }
 
-    if (!m3u8) {
-      throw new Error(`Timed out after waiting ${GLOBAL_TIMEOUT}ms`);
-    }
+    if (!m3u8) throw new Error(`Timed out after waiting ${GLOBAL_TIMEOUT}ms`);
     return m3u8;
   } finally {
     try { await ctx.close(); } catch {}
@@ -166,23 +172,22 @@ async function extractM3U8FromPage(pageUrl) {
   }
 }
 
-/* ========================= ROTAS HTTP ========================= */
+/* ===== Rotas ===== */
 
 app.get("/", (_req, res) => {
   res.type("html").send(`
     <h2>Gerador de Player (voodc → seu player)</h2>
     <ul>
-      <li><code>/extract?url=https://voodc.com/...</code> → retorna JSON com o .m3u8</li>
-      <li><code>/make-player?url=https://voodc.com/...&title=Meu%20Canal</code> → responde HTML do seu player</li>
+      <li><code>/extract?url=https://voodc.com/...</code> → JSON com o .m3u8</li>
+      <li><code>/make-player?url=https://voodc.com/...&title=Meu%20Canal</code> → HTML do seu player</li>
     </ul>
-    <p style="font:14px system-ui;color:#888">Dica: passe o parâmetro <b>url</b> em URL-encoded.</p>
+    <p style="font:14px system-ui;color:#888">Passe <b>url</b> em URL-encoded.</p>
   `);
 });
 
 app.get("/extract", async (req, res) => {
   const pageUrl = req.query.url;
   if (!pageUrl) return res.status(400).json({ error: "Informe ?url=" });
-
   try {
     const m3u8 = await extractM3U8FromPage(String(pageUrl));
     res.json({ m3u8 });
@@ -220,12 +225,11 @@ app.get("/player", (req, res) => {
 <script>
 const src = ${JSON.stringify(String(m3u8))};
 const video = document.getElementById('video');
-
 if (Hls.isSupported()) {
   const hls = new Hls({ maxBufferLength: 20, enableWorker: true });
   hls.loadSource(src);
   hls.attachMedia(video);
-  hls.on(Hls.Events.ERROR, (_, data) => console.warn("HLS error:", data.type, data.details));
+  hls.on(Hls.Events.ERROR, (_, d) => console.warn("HLS error:", d.type, d.details));
 } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
   video.src = src;
 } else {
