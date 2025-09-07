@@ -1,14 +1,16 @@
 {
-  "name": "voodc-player-maker",
+  "name": "voodc-clean-embed",
   "version": "1.0.0",
+  "description": "Proxy que reescreve o embed do voodc removendo anúncios",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "cheerio": "^1.0.0",
     "express": "^4.19.2",
-    "puppeteer": "^23.4.0",
-    "qs": "^6.13.0"
+    "morgan": "^1.10.0",
+    "node-fetch": "^3.3.2"
   }
 }
