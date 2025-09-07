@@ -5,77 +5,57 @@ import * as cheerio from "cheerio";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/** Permita voodc (ajuste se precisar) */
-const ALLOWED_HOSTS = new Set(["voodc.com", "www.voodc.com"]);
+// UA de navegador desktop comum
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-/** Seletores e padrões simples de anúncios/overlays */
+// padrões de anúncios (apenas para ocultar/retirar iframes de ads)
 const AD_HOSTS = [
   /doubleclick\.net/i, /googlesyndication\.com/i, /google-analytics\.com/i,
   /adservice\.google\.com/i, /taboola|outbrain|mgid|revcontent/i,
   /propellerads|popcash|adnxs|rubiconproject|criteo/i
 ];
 const AD_SELECTORS = [
-  "#ads",".ads","[id*='ad-']","[class*='ad-']",".ad",".ad-container",".ad-slot",
-  ".advertisement",".pop",".popup",".overlay",".modal-backdrop",".backdrop",
+  "#ads",".ads","[id*='ad-']","[class*='ad-']",
+  ".ad",".ad-container",".ad-slot",".advertisement",
+  ".pop",".popup",".overlay",".modal-backdrop",".backdrop",
   ".banner","#banner",".cookie",".gdpr"
 ];
 
-function isAllowed(urlStr) {
-  try {
-    const h = new URL(urlStr).hostname;
-    return ALLOWED_HOSTS.has(h);
-  } catch {
-    return false;
-  }
-}
-function isAdHost(urlStr) {
-  try {
-    const h = new URL(urlStr).hostname;
-    return AD_HOSTS.some(rx => rx.test(h));
-  } catch { return false; }
-}
-function absolutize(base, rel) {
-  try { return new URL(rel, base).toString(); }
-  catch { return rel; }
-}
+function absolutize(base, rel){ try{ return new URL(rel, base).toString(); }catch{ return rel; } }
+function isAdHost(urlStr){ try{ return AD_HOSTS.some(rx => rx.test(new URL(urlStr).hostname)); }catch{ return false; } }
 
-/** Proxy genérico de QUALQUER recurso (HTML/JS/CSS/img/m3u8/TS/...) */
+/** Proxy universal: entrega qualquer recurso como se fosse local */
 app.get("/pipe", async (req, res) => {
   const u = String(req.query.u || "");
   if (!u) return res.status(400).send("Use ?u=<URL>");
-  if (!isAllowed(u)) return res.status(400).send("Host não permitido");
 
   try {
     const upstream = await fetch(u, {
       redirect: "follow",
       headers: {
         "User-Agent": UA,
-        "Referer": "https://voodc.com/",
-        "Origin": "https://voodc.com",
+        // referer/origin: ajudam se o site exigir
+        "Referer": new URL(u).origin + "/",
+        "Origin": new URL(u).origin,
         "Accept": "*/*",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
       }
     });
 
-    // Copia status e alguns headers, mas remove bloqueios
     res.status(upstream.status);
+
+    // Copia headers úteis, mas remove os que bloqueiam em iframe/proxy
     const skip = new Set([
-      "content-security-policy",
-      "x-frame-options",
-      "cross-origin-embedder-policy",
-      "cross-origin-opener-policy",
-      "cross-origin-resource-policy",
-      "permissions-policy",
-      "referrer-policy",
-      "report-to"
+      "content-security-policy","x-frame-options",
+      "cross-origin-embedder-policy","cross-origin-opener-policy","cross-origin-resource-policy",
+      "permissions-policy","referrer-policy","report-to"
     ]);
     for (const [k, v] of upstream.headers.entries()) {
       if (!skip.has(k.toLowerCase())) res.setHeader(k, v);
     }
 
-    // Stream direta do corpo (funciona para binários e textos)
+    // Stream do corpo
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.send(buf);
   } catch (e) {
@@ -83,53 +63,47 @@ app.get("/pipe", async (req, res) => {
   }
 });
 
-/** Reescreve TODO HTML para carregar TUDO via /pipe (mesma origem) e limpa ads */
-function rewriteHtmlToProxy(html, baseUrl, clean = true) {
+/** Reescreve todo HTML para que TUDO carregue via /pipe (mesma origem) */
+function rewriteHtml(html, baseUrl, hideAds = true) {
   const $ = cheerio.load(html, { decodeEntities: false });
 
-  // Remove <meta http-equiv="Content-Security-Policy"> se houver
+  // remove CSP por meta tag
   $("meta[http-equiv='Content-Security-Policy']").remove();
 
-  // Limpa anúncios (se clean = true)
-  if (clean) {
-    $("script").each((_, el) => {
-      const src = $(el).attr("src") || "";
-      const code = $(el).html() || "";
-      const bad = isAdHost(src) ||
-        /ad(block|vert|s|unit)|popunder|banner|interstitial|taboola|outbrain|mgid|pushads/i.test(src+code);
-      if (bad) $(el).remove();
-    });
-    $("iframe").each((_, el) => {
-      const src = $(el).attr("src") || "";
-      if (isAdHost(src)) $(el).remove();
-    });
-    $(AD_SELECTORS.join(",")).remove();
-  }
+  // base para manter relativas coerentes (ainda assim vamos reescrever)
+  if ($("head base").length) $("head base").attr("href", baseUrl);
+  else $("head").prepend(`<base href="${baseUrl}">`);
 
-  // Força full-screen visual
-  $("head").prepend(`<base href="${baseUrl}">`);
+  // full screen + ocultar overlays comuns
   $("head").append(`
     <style>
       html,body{margin:0;padding:0;background:#000;height:100%}
       body,#app,#root{background:#000!important}
       iframe,video{width:100vw!important;height:100vh!important;border:0}
+      ${hideAds ? ".overlay,.modal,.modal-backdrop,.backdrop,.popup,.pop,.ads,.ad,.advert{display:none!important}" : ""}
     </style>
   `);
 
-  // Reescreve todos os atributos que podem puxar rede
+  // Se hideAds: remove apenas iframes de hosts de ad (não mexe nos scripts do player!)
+  if (hideAds) {
+    $("iframe").each((_, el) => {
+      const src = $(el).attr("src") || "";
+      if (isAdHost(src)) $(el).remove();
+    });
+  }
+
+  // Reescreve atributos para passar por /pipe
   const rewriteAttr = (el, attr) => {
     const val = $(el).attr(attr);
     if (!val) return;
     const abs = absolutize(baseUrl, val);
-    // As chamadas passam por /pipe?u=...
-    $(el).attr(attr, "/pipe?u=" + encodeURIComponent(abs));
+    if (/^https?:\/\//i.test(abs)) $(el).attr(attr, "/pipe?u=" + encodeURIComponent(abs));
   };
 
   $("script,link,iframe,img,source,video,audio").each((_, el) => {
     const tag = el.tagName?.toLowerCase?.() || el.name;
     if (tag === "link") rewriteAttr(el, "href");
     rewriteAttr(el, "src");
-    // srcset
     if ($(el).attr("srcset")) {
       const parts = ($(el).attr("srcset") || "").split(",").map(s => s.trim()).filter(Boolean);
       const out = parts.map(p => {
@@ -141,34 +115,25 @@ function rewriteHtmlToProxy(html, baseUrl, clean = true) {
     }
   });
 
-  // Reescreve <a href> para ficar dentro do proxy (navegação)
+  // Links de navegação também vão para /pipe
   $("a[href]").each((_, el) => rewriteAttr(el, "href"));
-
-  // Injeta um pequeno helper para clicks que gerem novas janelas/iframes
-  $("body").append(`
-    <script>
-      // Garante que fetches dinâmicos por JS usando URL relativa continuem funcionando
-      // (como já temos <base>, na maioria dos casos fica ok)
-      console.log("Proxy HTML reescrito via /pipe, base:", ${JSON.stringify(baseUrl)});
-    </script>
-  `);
 
   return $.html();
 }
 
-/** /clean → reescreve TUDO para /pipe e remove anúncios */
+/** Página limpa do voodc, reescrita para o proxy e sem anúncios */
 app.get("/clean", async (req, res) => {
   const u = String(req.query.u || req.query.url || "");
   if (!u) return res.status(400).send("Use ?u=<embed do voodc>");
-  if (!isAllowed(u)) return res.status(400).send("Host não permitido");
+  // (Sem whitelist de host: o voodc costuma usar CDNs/hosts diversos; deixamos universal)
 
   try {
     const upstream = await fetch(u, {
       redirect: "follow",
       headers: {
         "User-Agent": UA,
-        "Referer": "https://voodc.com/",
-        "Origin": "https://voodc.com",
+        "Referer": new URL(u).origin + "/",
+        "Origin": new URL(u).origin,
         "Accept": "text/html,*/*",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
       }
@@ -177,33 +142,32 @@ app.get("/clean", async (req, res) => {
     if (!upstream.ok) return res.status(502).send("Upstream error: " + upstream.status);
     const finalUrl = upstream.url;
     const ct = upstream.headers.get("content-type") || "";
-    if (!/html/i.test(ct)) {
-      // Se não for HTML, devolve via pipe
-      res.redirect("/pipe?u=" + encodeURIComponent(finalUrl));
-      return;
-    }
+
+    // Se não for HTML, manda pelo /pipe
+    if (!/html/i.test(ct)) return res.redirect("/pipe?u=" + encodeURIComponent(finalUrl));
 
     const html = await upstream.text();
-    const rewritten = rewriteHtmlToProxy(html, finalUrl, /*clean=*/true);
+    const rewritten = rewriteHtml(html, finalUrl, /*hideAds=*/true);
 
-    // Cabeçalhos sem bloqueios
+    // Cabeçalhos sem bloqueio
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("X-Frame-Options", "ALLOWALL");
     res.setHeader("Cache-Control", "no-store");
+    // CSP propositalmente ausente (pra não quebrar scripts do player)
     res.status(200).send(rewritten);
   } catch (e) {
     res.status(500).send("Clean error: " + (e?.message || e));
   }
 });
 
-/** Página inicial */
+/** Home */
 app.get("/", (_req, res) => {
   res.type("html").send(`
-    <h2>Voodc Reverse Proxy</h2>
-    <p>Abra (URL-encoded):</p>
+    <h2>Voodc Player (sem anúncios)</h2>
+    <p>Abrir (URL-encoded):</p>
     <ul>
-      <li><code>/pipe?u=https%3A%2F%2Fvoodc.com%2Fembed%2FSEU_ID.html</code> (proxy puro)</li>
-      <li><code>/clean?u=https%3A%2F%2Fvoodc.com%2Fembed%2FSEU_ID.html</code> (proxy com limpeza de ads)</li>
+      <li><code>/clean?u=https%3A%2F%2Fvoodc.com%2Fembed%2FSEU_ID.html</code> &larr; usa o MESMO player, sem anúncios</li>
+      <li><code>/pipe?u=https%3A%2F%2Fvoodc.com%2Fembed%2FSEU_ID.html</code> &larr; proxy puro (debug)</li>
     </ul>
   `);
 });
