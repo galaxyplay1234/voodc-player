@@ -1,14 +1,13 @@
 {
-  "name": "voodc-player-clean-proxy",
+  "name": "hls-repeater",
   "version": "1.0.0",
-  "description": "Reverse proxy universal para abrir o embed do voodc sem anúncios",
   "type": "module",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "cheerio": "^1.0.0",
     "express": "^4.19.2",
     "morgan": "^1.10.0"
-  },
-  "engines": { "node": ">=18" }
+  }
 }
