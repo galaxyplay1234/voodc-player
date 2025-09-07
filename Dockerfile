@@ -1,9 +1,8 @@
-FROM node:20-slim
+FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci || npm install
-COPY . .
-ENV NODE_ENV=production
+RUN npm ci --omit=dev || npm install --omit=dev
+COPY server.js ./
 ENV PORT=3000
 EXPOSE 3000
 CMD ["node", "server.js"]
