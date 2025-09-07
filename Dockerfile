@@ -10,13 +10,20 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
 
-# (Opcional) Baixar Chromium no build para cold-start mais rápido
-# Se der erro de build, remova esta etapa que o Puppeteer baixa em runtime.
-RUN node -e "require('puppeteer').createBrowserFetcher().download('133.0.6943.53').then(()=>console.log('Chromium ok')).catch(()=>process.exit(0))"
+# Se NÃO tiver package-lock.json no repo:
+RUN npm install --omit=dev
+# (Se você optar por adicionar o package-lock.json, troque por:)
+# RUN npm ci --omit=dev
 
 COPY . .
+
+# (Opcional) baixar Chromium no build (com tolerância a falha)
+# Se der erro de rede na Koyeb, pode REMOVER estas 2 linhas
+RUN node -e "try{require('puppeteer').createBrowserFetcher().download(process.env.PPTR_CHROME_REV||'133.0.6943.53').then(()=>console.log('Chromium ok')).catch(()=>console.log('skip predownload'))}catch(e){console.log('skip predownload')}"
+ENV PPTR_EXECUTABLE_PATH=""
+# Se você quiser fixar o Chromium do host, pode setar PPTR_EXECUTABLE_PATH, mas não é necessário.
+
 ENV NODE_ENV=production
 ENV PORT=3000
 EXPOSE 3000
