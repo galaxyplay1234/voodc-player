@@ -1,7 +1,7 @@
 {
-  "name": "voodc-clean-embed",
+  "name": "voodc-reverse-proxy",
   "version": "1.0.0",
-  "description": "Proxy que reescreve o embed do voodc removendo anúncios",
+  "description": "Reverse proxy para embeds do voodc com modo clean (sem anúncios)",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -11,5 +11,6 @@
     "cheerio": "^1.0.0",
     "express": "^4.19.2",
     "morgan": "^1.10.0"
-  }
+  },
+  "engines": { "node": ">=18" }
 }
